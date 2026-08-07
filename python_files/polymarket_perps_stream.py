@@ -30,6 +30,13 @@ PING = {
     },
 }
 
+SUPPORTED_SYMBOLS = [
+    'SP500-USD', 'GOLD-USD', 'WTIOIL-USD', 'NAS100-USD', 'SILVER-USD', 
+    'BTC-USD', 'ETH-USD', 'SOL-USD', 'SPCX-USD', 'HYPE-USD', 'MU-USD', 
+    'SKHY-USD', 'SKHYNIX-USD', 'AAPL-USD', 'MSFT-USD', 'GOOG-USD', 'AMZN-USD', 
+    'NVDA-USD', 'META-USD', 'TSLA-USD', 'AMD-USD', 'INTC-USD', 'AVGO-USD', 
+    'QCOM-USD', 'ARM-USD', 'TSM-USD', 'ASML-USD', 'SNDK-USD', 'DRAM-USD'
+]
 
 # ----------- UTILITY FUNCTIONS -----------
 
@@ -59,7 +66,7 @@ class PolymarketPerpsStream:
         self._stream_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
         self._subscribers: dict[str, list[asyncio.Queue]] = {}
-        self._prices: dict[str, float] = {}
+        self._latest: dict[str, dict] = {}
 
     async def start(self):
         if not self._stream_task:
@@ -78,8 +85,8 @@ class PolymarketPerpsStream:
         q: asyncio.Queue = asyncio.Queue(maxsize=1)
         self._subscribers.setdefault(ticker, []).append(q)
 
-        if ticker in self._prices:
-            q.put_nowait(self._prices[ticker])
+        if ticker in self._latest:
+            q.put_nowait(self._latest[ticker])
 
         return q
     
@@ -129,10 +136,15 @@ class PolymarketPerpsStream:
             index_price = float(index_price)
             mark_price = float(mark_price)
 
-        if abs(self._prices.get(symbol, 0) - index_price) < 1e-12:
+        if symbol in self._latest and abs(self._latest[symbol].get("index_price", 0) - index_price) < 1e-12:
             return
 
-        self._prices[symbol] = index_price
+        self._latest[symbol] = {
+            "symbol": symbol,
+            "timestamp": ts,
+            "index_price": index_price,
+            "mark_price": mark_price
+        }
 
         for queue in self._subscribers.get(symbol, []):
             if queue.full():
@@ -140,12 +152,7 @@ class PolymarketPerpsStream:
                     queue.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
-            queue.put_nowait({
-                "symbol": symbol,
-                "timestamp": ts,
-                "index_price": index_price,
-                "mark_price": mark_price
-            })
+            queue.put_nowait(self._latest[symbol])
 
     async def _stream(self):
         if not self.iid_to_ticker:
@@ -178,37 +185,52 @@ class PolymarketPerpsStream:
 # ---------- MAIN FUNCTION ----------
 
 async def main():
-    stream = PolymarketPerpsStream()
-    await stream.start()
 
-    symbols_to_subscribe = ['SP500-USD', 'GOLD-USD', 'WTIOIL-USD', 'NAS100-USD', 'SILVER-USD', 'BTC-USD', 'ETH-USD', 'SOL-USD', 'SPCX-USD', 'HYPE-USD', 'MU-USD', 'SKHY-USD', 'SKHYNIX-USD', 'AAPL-USD', 'MSFT-USD', 'GOOG-USD', 'AMZN-USD', 'NVDA-USD', 'META-USD', 'TSLA-USD', 'AMD-USD', 'INTC-USD', 'AVGO-USD', 'QCOM-USD', 'ARM-USD', 'TSM-USD', 'ASML-USD', 'SNDK-USD', 'DRAM-USD']
-    symbol_queues = {}
-    for symbol in symbols_to_subscribe:
-        symbol_queues[symbol] = await stream.subscribe_ticker(symbol)
+    async def consume(queue):
+        last_index_price = None
 
-    tasks = {
-        asyncio.create_task(q.get()): symbol
-        for symbol, q in symbol_queues.items()
-    }
+        while True:
+            data = await queue.get()
+            index_price = data["index_price"]
+            mark_price = data["mark_price"]
 
-    while True:
-        done, pending = await asyncio.wait(
-            tasks,
-            return_when=asyncio.FIRST_COMPLETED
-        )
+            if last_index_price is not None and abs(last_index_price - index_price) / last_index_price < 0.0001:
+                continue  # Skip if price change is less than 0.01%
+            last_index_price = index_price
 
-        for task in done:
-            symbol = tasks.pop(task)
-            data = task.result()
             datetime_str = time.strftime(
                 "%Y-%m-%d %H:%M:%S",
                 time.localtime(data["timestamp"] / 1000),
             )
 
-            log(f"{symbol:>11} | {datetime_str} | Index Price: {data['index_price']:<7} | Mark Price: {data['mark_price']}", level="INFO")
+            log(f"{data['symbol']:<11} | {datetime_str} | Index Price: {index_price:<8} | Mark Price: {mark_price:<8}", level="INFO")
 
-            tasks[asyncio.create_task(symbol_queues[symbol].get())] = symbol
+    stream = PolymarketPerpsStream()
+    await stream.start()
+
+    consumers = []
+
+    try:
+        for symbol in SUPPORTED_SYMBOLS:
+            queue = await stream.subscribe_ticker(symbol)
+            consumers.append(asyncio.create_task(consume(queue)))
+
+        await asyncio.gather(*consumers)
+
+    except asyncio.CancelledError:
+        log("Main task cancelled", level="INFO")
+
+    finally:
+        for task in consumers:
+            task.cancel()
+            
+        await asyncio.gather(*consumers, return_exceptions=True)
+        await stream.stop()
+        log("Shutdown complete", level="INFO")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n")

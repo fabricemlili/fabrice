@@ -112,12 +112,7 @@ class PolymarketTimeWeightedAveragePriceStream:
                             queue.get_nowait()  # Remove the old item
                         except asyncio.QueueEmpty:
                             pass
-                    await queue.put({
-                        "symbol": symbol,
-                        "timestamp": timestamp,
-                        "price": price,
-                        "window": window
-                    })
+                    await queue.put(self._latest[key])
 
             else:
                 log(f"Received non-update message: {data}", level="WARNING")
@@ -171,13 +166,28 @@ async def main():
 
     consumers = []
 
-    for symbol in SUPPORTED_TWAP_SYMBOLS:
-        for window in (30, 60):
-            queue = await stream.subscribe(symbol, window)
-            consumers.append(asyncio.create_task(consume(queue)))
+    try:
+        for symbol in SUPPORTED_TWAP_SYMBOLS:
+            for window in (30, 60):
+                queue = await stream.subscribe(symbol, window)
+                consumers.append(asyncio.create_task(consume(queue)))
 
-    await asyncio.gather(*consumers)
+        await asyncio.gather(*consumers)
+
+    except asyncio.CancelledError:
+        log("Main task cancelled", level="INFO")
+
+    finally:
+        for task in consumers:
+            task.cancel()
+            
+        await asyncio.gather(*consumers, return_exceptions=True)
+        await stream.stop()
+        log("Shutdown complete", level="INFO")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n")

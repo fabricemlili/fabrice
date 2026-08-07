@@ -1,5 +1,5 @@
 [project]
-name = "polymarket-perps-stream-py"
+name = "python-files"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-polymarket-perps-stream-py = "polymarket_perps_stream_py:main"
+python-files = "python_files:main"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]

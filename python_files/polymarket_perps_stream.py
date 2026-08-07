@@ -7,8 +7,12 @@ import time
 import websockets
 from websockets.exceptions import ConnectionClosed
 
+from utils.logger import log
+
 
 # ------------ CONSTANTS ------------
+
+RECONNECT_DELAY = 5  # seconds
 
 WS_URL = "wss://ws.perpetuals.polymarket.com/v1/ws"
 
@@ -28,9 +32,6 @@ PING = {
 
 
 # ----------- UTILITY FUNCTIONS -----------
-
-def log(msg):
-    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {msg}")
 
 async def get_iid_to_ticker_mapping() -> dict[str, str]:
     url = HTTP_URL + "/info/tickers"
@@ -62,12 +63,12 @@ class PolymarketPerpsStream:
 
     async def start(self):
         if not self._stream_task:
-            log("Starting Polymarket Perps WebSocket stream...")
+            log("Starting Polymarket Perps WebSocket stream...", level="INFO")
             self._stream_task = asyncio.create_task(self._stream())
 
     async def stop(self):
         if self._stream_task:
-            log("Stopping Polymarket Perps WebSocket stream...")
+            log("Stopping Polymarket Perps WebSocket stream...", level="INFO")
             self._stream_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._stream_task
@@ -90,9 +91,9 @@ class PolymarketPerpsStream:
                 if not subs:
                     del self._subscribers[ticker]
             except ValueError:
-                log(f"{ticker} | Queue not found in subscribers list.")
+                log(f"{ticker} | Queue not found in subscribers list.", level="WARNING")
 
-    async def _heartbeat(self, ws):
+    async def _heartbeat(self, ws: websockets.ClientConnection):
         try:
             while True:
                 await asyncio.sleep(30)
@@ -100,7 +101,7 @@ class PolymarketPerpsStream:
         except Exception:
             pass
 
-    async def _subscribe_all_tickers(self, ws):
+    async def _subscribe_all_tickers(self, ws: websockets.ClientConnection):
         await ws.send(json.dumps(SUBSCRIBE))
         sub_resp = json.loads(await ws.recv())
         sub_status = sub_resp.get("data", [{}])[0].get("status", [])
@@ -128,7 +129,6 @@ class PolymarketPerpsStream:
             index_price = float(index_price)
             mark_price = float(mark_price)
 
-
         if abs(self._prices.get(symbol, 0) - index_price) < 1e-12:
             return
 
@@ -140,8 +140,12 @@ class PolymarketPerpsStream:
                     queue.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
-            queue.put_nowait(index_price)
-
+            queue.put_nowait({
+                "symbol": symbol,
+                "timestamp": ts,
+                "index_price": index_price,
+                "mark_price": mark_price
+            })
 
     async def _stream(self):
         if not self.iid_to_ticker:
@@ -163,12 +167,12 @@ class PolymarketPerpsStream:
                                 await self._heartbeat_task
                             self._heartbeat_task = None
 
-            except ConnectionClosed:
-                log("Connection closed. Reconnecting...")
-                await asyncio.sleep(5)
+            except websockets.ConnectionClosed as e:
+                log(f"Connection closed: {e}. Reconnecting in {RECONNECT_DELAY} seconds...", level="WARNING")
+                await asyncio.sleep(RECONNECT_DELAY)
             except Exception as e:
-                log(f"Error in WebSocket stream: {e}. Reconnecting...")
-                await asyncio.sleep(5)
+                log(f"Unexpected error: {e}. Reconnecting in {RECONNECT_DELAY} seconds...", level="ERROR")
+                await asyncio.sleep(RECONNECT_DELAY)
 
 
 # ---------- MAIN FUNCTION ----------
@@ -195,9 +199,13 @@ async def main():
 
         for task in done:
             symbol = tasks.pop(task)
-            price = task.result()
+            data = task.result()
+            datetime_str = time.strftime(
+                "%Y-%m-%d %H:%M:%S",
+                time.localtime(data["timestamp"] / 1000),
+            )
 
-            log(f"{symbol:>11} | Price: {price}")
+            log(f"{symbol:>11} | {datetime_str} | Index Price: {data['index_price']:<7} | Mark Price: {data['mark_price']}", level="INFO")
 
             tasks[asyncio.create_task(symbol_queues[symbol].get())] = symbol
 

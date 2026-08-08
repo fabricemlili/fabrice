@@ -7,7 +7,7 @@ import time
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from utils.logger import log
+from python_files.logger import log
 
 
 # ------------ CONSTANTS ------------
@@ -184,7 +184,7 @@ class PolymarketPerpsStream:
 
 # ---------- MAIN FUNCTION ----------
 
-async def main():
+async def run():
 
     async def consume(queue):
         last_index_price = None
@@ -229,8 +229,12 @@ async def main():
         log("Shutdown complete", level="INFO")
 
 
-if __name__ == "__main__":
+def main():
     try:
-        asyncio.run(main())
+        asyncio.run(run())
     except KeyboardInterrupt:
         print("\n")
+
+
+if __name__ == "__main__":
+    main()

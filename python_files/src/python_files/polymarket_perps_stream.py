@@ -3,11 +3,13 @@ import aiohttp
 import contextlib
 import json
 import time
-
 import websockets
-from websockets.exceptions import ConnectionClosed
-
 from python_files.logger import log
+
+
+# ------------ PARAMETERS ------------
+MIN_INDEX_PRICE_CHANGE_PERCENTAGE = 0.01
+MIN_MARK_PRICE_CHANGE_PERCENTAGE = 0.01
 
 
 # ------------ CONSTANTS ------------
@@ -188,14 +190,21 @@ async def run():
 
     async def consume(queue):
         last_index_price = None
+        last_mark_price = None
 
         while True:
             data = await queue.get()
             index_price = data["index_price"]
             mark_price = data["mark_price"]
 
-            if last_index_price is not None and abs(last_index_price - index_price) / last_index_price < 0.0001:
-                continue  # Skip if price change is less than 0.01%
+            if (
+                last_index_price is not None
+                and last_mark_price is not None
+                and abs(last_index_price - index_price) / last_index_price < MIN_INDEX_PRICE_CHANGE_PERCENTAGE / 100
+                and abs(last_mark_price - mark_price) / last_mark_price < MIN_MARK_PRICE_CHANGE_PERCENTAGE / 100
+            ):
+                continue   # Skip logging if the price change is below the threshold
+
             last_index_price = index_price
 
             datetime_str = time.strftime(

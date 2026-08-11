@@ -4,6 +4,11 @@ import json
 import time
 from python_files.logger import log
 
+
+# ------------ PARAMETERS ------------
+MIN_PRICE_CHANGE_PERCENTAGE = 0.01
+
+
 # ------------ CONSTANTS ------------
 
 RECONNECT_DELAY = 5  # seconds
@@ -149,8 +154,9 @@ async def run():
             data = await queue.get()
             price = data["price"]
 
-            if last_price is not None and abs(last_price - price) / last_price < 0.0001:
-                continue  # Skip if price change is less than 0.01%
+            if last_price is not None and abs(last_price - price) / last_price < MIN_PRICE_CHANGE_PERCENTAGE / 100:
+                continue  # Skip if price change is less than MIN_PRICE_CHANGE_PERCENTAGE
+            
             last_price = price
 
             datetime_str = time.strftime(

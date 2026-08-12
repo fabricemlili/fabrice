@@ -8,24 +8,31 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
+# ===========================================================
+# PARAMETERS
+# ===========================================================
+
 TOKEN = os.getenv("TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")
+SPORTRADAR_API_KEY = os.getenv("SPORTRADAR_API_KEY")
+RETRY_DELAY = 5  # seconds
 
-DISCORD_API_HEADERS = {
-    "Authorization": f"Bot {TOKEN}",
-    "Content-Type": "application/json"
-}
+# ===========================================================
+# CONSTANTS
+# ===========================================================
+
 BASE_URL_DISCORD = "https://discord.com/api/v10"
 
 SPORTRADAR_API_HEADERS = {
     "accept": "application/json",
-    "x-api-key": os.getenv("SPORTRADAR_API_KEY")
+    "x-api-key": SPORTRADAR_API_KEY
 }
 SUMMARIES_URL = "https://api.sportradar.com/tennis/trial/v3/en/schedules/live/summaries.json"
 TIMELINES_DELTA_URL = "https://api.sportradar.com/tennis/trial/v3/en/schedules/live/timelines_delta.json"
 
-RETRY_DELAY = 5  # seconds
-
+# ===========================================================
+# UTILITIES (fetch_json, fetch_json_with_retry, parse_json)
+# ===========================================================
 
 async def fetch_json(
     url: str,
@@ -117,17 +124,24 @@ def parse_json(data):
 
     return data
 
+# ===========================================================
+# DISCORD GUILD MANAGER
+# ===========================================================
 
 class DiscordGuildManager:
     def __init__(self, token, guild_id):
         self.token = token
         self.guild_id = guild_id
+        self.headers = {
+            "Authorization": f"Bot {self.token}",
+            "Content-Type": "application/json"
+        }
 
     async def _request(
         self,
+        method,
         url,
         data=None,
-        type="POST",
         session: Optional[aiohttp.ClientSession] = None
     ):
         close_session = session is None
@@ -136,35 +150,18 @@ class DiscordGuildManager:
             session = aiohttp.ClientSession()
 
         try:
-            if type == "POST":
-                async with session.post(
-                    url,
-                    json=data,
-                    headers=DISCORD_API_HEADERS
-                ) as response:
-                    response.raise_for_status()
-                    return await response.json()
+            async with session.request(
+                method,
+                url,
+                json=data,
+                headers=self.headers
+            ) as response:
+                response.raise_for_status()
 
-            elif type == "GET":
-                async with session.get(
-                    url,
-                    headers=DISCORD_API_HEADERS
-                ) as response:
-                    response.raise_for_status()
-                    return await response.json()
+                if response.status == 204:  # No Content
+                    return True
 
-            elif type == "DELETE":
-                async with session.delete(
-                    url,
-                    headers=DISCORD_API_HEADERS
-                ) as response:
-                    response.raise_for_status()
-
-                    # Discord returns 204 No Content
-                    if response.status == 204:
-                        return True
-
-                    return await response.json()
+                return await response.json()
 
         except aiohttp.ClientError as e:
             log(f"Discord API error: {e}", level="ERROR")
@@ -191,6 +188,7 @@ class DiscordGuildManager:
             data["parent_id"] = category_id
 
         response = await self._request(
+            "POST",
             url,
             data=data,
             session=session
@@ -207,8 +205,8 @@ class DiscordGuildManager:
         url = f"{BASE_URL_DISCORD}/channels/{channel_id}"
 
         response = await self._request(
+            "DELETE",
             url,
-            type="DELETE",
             session=session
         )
 
@@ -219,41 +217,46 @@ class DiscordGuildManager:
         log(f"Failed to delete channel: {channel_id}", level="ERROR")
         return None
 
-    async def delete_all_channels(self) -> list[str]:
+    async def get_all_channels(self, session: Optional[aiohttp.ClientSession] = None) -> list[dict]:
+        url = f"{BASE_URL_DISCORD}/guilds/{self.guild_id}/channels"
+        channels = await self._request(
+            "GET",
+            url,
+            session=session
+        )
+
+        if not isinstance(channels, list):
+            log("Failed to retrieve channels.", level="ERROR")
+            return []
+
+        return channels
+
+    async def delete_all_channels(self, session: Optional[aiohttp.ClientSession] = None) -> list[str]:
         url = f"{BASE_URL_DISCORD}/guilds/{self.guild_id}/channels"
 
-        async with aiohttp.ClientSession() as session:
-            channels = await self._request(
-                url,
-                type="GET",
-                session=session
-            )
+        channels = await self.get_all_channels(session=session)
 
-            if not isinstance(channels, list):
-                log("Failed to retrieve channels.", level="ERROR")
-                return []
+        if not channels:
+            log("No channels found.")
+            return []
 
-            if not channels:
-                log("No channels found.")
-                return []
+        log(f"Found {len(channels)} channel(s).")
 
-            log(f"Found {len(channels)} channel(s).")
+        deleted_channels = []
 
-            deleted_channels = []
+        for channel in channels:
+            channel_id = channel["id"]
+            channel_name = channel["name"]
 
-            for channel in channels:
-                channel_id = channel["id"]
-                channel_name = channel["name"]
+            log(f"Deleting channel: {channel_name}")
 
-                log(f"Deleting channel: {channel_name}")
+            deleted_channel_id = await self.delete_channel(channel_id, session=session)
+            if deleted_channel_id:
+                deleted_channels.append(deleted_channel_id)
+            await asyncio.sleep(1)
 
-                deleted_channel_id = await self.delete_channel(channel_id, session=session)
-                if deleted_channel_id:
-                    deleted_channels.append(deleted_channel_id)
-                await asyncio.sleep(1)
-
-            log(f"All channels have been deleted. Deleted channels: {deleted_channels}")
-            return deleted_channels
+        log(f"All channels have been deleted. Deleted channels: {deleted_channels}")
+        return deleted_channels
         
     async def send_message(
         self,
@@ -268,9 +271,9 @@ class DiscordGuildManager:
         }
 
         response = await self._request(
+            "POST",
             url,
             data=data,
-            type="POST",
             session=session
         )
 
@@ -294,6 +297,7 @@ class DiscordGuildManager:
         }
 
         response = await self._request(
+            "POST",
             url,
             data=data,
             session=session
@@ -306,10 +310,9 @@ class DiscordGuildManager:
         log("Failed to create category.", level="ERROR")
         return None, None
 
-
-
-
-
+# ===========================================================
+# TENNIS LIVE MATCH TRACKER
+# ===========================================================
 
 class TennisLiveMatchTracker:
     def __init__(self, session: Optional[aiohttp.ClientSession] = None):
@@ -404,7 +407,27 @@ class TennisLiveMatchTracker:
                 await asyncio.sleep(5)
 
 
-       
+# ===========================================================
+# 
+# ===========================================================
+
+
+def generate_channel_name(home_player_name, away_player_name, match_type):
+    if match_type == "singles":
+        channel_name = "-".join(home_player_name.split(" ") + ["vs"] + away_player_name.split(" ")).lower()
+    elif match_type == "doubles":
+        channel_name = "-".join(home_player_name.split(" ") + ["vs"] + away_player_name.split(" ")).lower()
+    else:
+        raise ValueError(f"Unknown match type: {match_type}")
+
+    return channel_name
+
+
+def generate_category_name(tournament_name):
+    category_name = "-".join(tournament_name.split(" ")).lower().replace(",", "")
+    return category_name
+
+
 def extract_player_info(competitors, qualifier, match_type) -> dict:
     if match_type == "singles":
         player = next((c for c in competitors if c["event_competitors_qualifier"] == qualifier), None)
@@ -450,10 +473,99 @@ def extract_player_info(competitors, qualifier, match_type) -> dict:
             }
     return {}
 
-            
+
+def extract_score_info(score_info: dict) -> dict:
+    last_point_info = score_info["event_timeline_timeline"][-1]
+    last_point_type = last_point_info["timeline_timeline_type"]
+
+    if last_point_type in ["match_started", "period_start", "service_fault", "period_score"]:
+        return {}
+
+    elif last_point_type != "point":
+        print(json.dumps(last_point_info, indent=4))
+        exit()
+
+    last_point_winner = last_point_info["timeline_timeline_competitor"]
+    score = [f"{s['scores_home_score']}/{s['scores_away_score']}" for s in score_info.get("status_period_scores", [])]
+    serving = score_info["game_state_serving"]
+    game_score = (
+        f"{score_info['state_home_score']}-{score_info['state_away_score']}"
+        if serving == "home"
+        else f"{score_info['state_away_score']}-{score_info['state_home_score']}"
+    ).replace("50", "A")
+
+    return {
+        "last_point_type": last_point_type,
+        "last_point_winner": last_point_winner,
+        "score": score,
+        "game_score": game_score,
+        "serving": serving
+    }
 
 
-        
+def extract_match_info(match_info: dict) -> dict:
+    organization = match_info["context_category_name"]
+
+    if organization in ["UTR Women", "UTR Men"]:
+        return {}
+
+    stadium = match_info["event_venue_name"]
+    match_type = match_info["context_competition_type"]
+    gender = match_info["context_competition_gender"]
+    competitors = match_info["sport_event_competitors"]
+
+    round = match_info["context_round_name"]
+    tournament = match_info["context_competition_name"]
+
+    if match_type == "singles":
+        home_player = extract_player_info(competitors, "home", match_type)
+        home_team_name = home_player["last_name"]
+
+        away_player = extract_player_info(competitors, "away", match_type)
+        away_team_name = away_player["last_name"]
+
+    elif match_type == "doubles":
+        home_players = extract_player_info(competitors, "home", match_type)
+        home_team_name = f"{home_players['player_1']['last_name']}-{home_players['player_2']['last_name']}"
+
+        away_players = extract_player_info(competitors, "away", match_type)
+        away_team_name = f"{away_players['player_1']['last_name']}-{away_players['player_2']['last_name']}"
+
+    return {
+        "organization": organization,
+        "stadium": stadium,
+        "match_type": match_type,
+        "gender": gender,
+        "round": round,
+        "tournament": tournament,
+        "home_name": home_team_name,
+        "away_name": away_team_name
+    }
+
+
+def extract_all_info(score_info: dict, match_info: dict) -> Optional[dict]:
+    score_details = extract_score_info(score_info)
+    if not score_details:
+        return None
+
+    match_details = extract_match_info(match_info)
+    if not match_details:
+        return None
+
+    category_name = generate_category_name(match_details["tournament"])
+    channel_name = generate_channel_name(match_details["home_name"], match_details["away_name"], match_details["match_type"])
+
+    return score_details | match_details | {
+        "category_name": category_name,
+        "channel_name": channel_name
+    }
+
+
+# ===========================================================
+# MAIN FUNCTION
+# ===========================================================
+
+
 async def main():
     category_mapping = {}
     channel_mapping = {}
@@ -461,7 +573,7 @@ async def main():
     
     async with aiohttp.ClientSession() as session:
         discord_guild_manager = DiscordGuildManager(TOKEN, GUILD_ID)
-        # await discord_guild_manager.delete_all_channels()
+        await discord_guild_manager.delete_all_channels(session=session)
 
         tennis_live_match_tracker = TennisLiveMatchTracker(session=session)
         asyncio.create_task(tennis_live_match_tracker.run())
@@ -470,102 +582,52 @@ async def main():
         while True:
             event_id, score_info, match_info = await queue.get()
 
-            organization = match_info["context_category_name"]
-
-            if organization in ["UTR Women", "UTR Men"]:
+            all_info = extract_all_info(score_info, match_info)
+            if all_info is None:
                 queue.task_done()
                 continue
 
-            last_point_info = score_info["event_timeline_timeline"][0]
-            last_point_type = last_point_info["timeline_timeline_type"]
-
-            try:
-                last_point_winner = last_point_info["timeline_timeline_competitor"]
-            except KeyError:
-                print(json.dumps(score_info, indent=4))
-                exit(1)
-
-            score = [f"{s['scores_home_score']}/{s['scores_away_score']}" for s in score_info.get("status_period_scores", [])]
-            try:
-                serving = score_info["game_state_serving"]
-            except KeyError:
-                print(json.dumps(score_info, indent=4))
-                exit(1)
-
-            game_score = (
-                f"{score_info['state_home_score']}-{score_info['state_away_score']}"
-                if serving == "home"
-                else f"{score_info['state_away_score']}-{score_info['state_home_score']}"
-            ).replace("50", "A")
-
-            stadium = match_info["event_venue_name"]
-            match_type = match_info["context_competition_type"]
-            gender = match_info["context_competition_gender"]
-            competitors = match_info["sport_event_competitors"]
-
-            round = match_info["context_round_name"]
-            tournament = match_info["context_competition_name"]
-            category_name = "-".join(tournament.split(" ")).lower().replace(",", "")
-
-            if match_type == "singles":
-                home_player = extract_player_info(competitors, "home", match_type)
-                home_player_name = home_player["last_name"]
-
-                away_player = extract_player_info(competitors, "away", match_type)
-                away_player_name = away_player["last_name"]
-
-                channel_name = "-".join(home_player_name.split(" ") + ["vs"] + away_player_name.split(" ")).lower()
-
-            elif match_type == "doubles":
-                home_players = extract_player_info(competitors, "home", match_type)
-                home_player_name = f"{home_players['player_1']['last_name']}-{home_players['player_2']['last_name']}"
-
-                away_players = extract_player_info(competitors, "away", match_type)
-                away_player_name = f"{away_players['player_1']['last_name']}-{away_players['player_2']['last_name']}"
-      
-                channel_name = "-".join(home_player_name.split(" ") + ["vs"] + away_player_name.split(" ")).lower()
-
-            if category_name not in category_mapping:
-                category_id, name = await discord_guild_manager.create_category(category_name, session=session)
-                if category_name != name:
-                    raise ValueError(f"Category name mismatch: expected {category_name}, got {name}")
-                category_mapping[category_name] = category_id
+            if all_info['category_name'] not in category_mapping:
+                category_id, name = await discord_guild_manager.create_category(all_info['category_name'], session=session)
+                if all_info['category_name'] != name:
+                    raise ValueError(f"Category name mismatch: expected {all_info['category_name']}, got {name}")
+                category_mapping[all_info['category_name']] = category_id
          
-            if channel_name not in channel_mapping:
-                category_id = category_mapping[category_name]
-                channel_id, name = await discord_guild_manager.create_channel(channel_name, category_id=category_id, session=session)
-                if channel_name != name:
-                    raise ValueError(f"Channel name mismatch: expected {channel_name}, got {name}")
-                channel_mapping[channel_name] = channel_id
+            if all_info['channel_name'] not in channel_mapping:
+                category_id = category_mapping[all_info['category_name']]
+                channel_id, name = await discord_guild_manager.create_channel(all_info['channel_name'], category_id=category_id, session=session)
+                if all_info['channel_name'] != name:
+                    raise ValueError(f"Channel name mismatch: expected {all_info['channel_name']}, got {name}")
+                channel_mapping[all_info['channel_name']] = channel_id
 
-            home_display = home_player_name.replace("-", " / ")
-            away_display = away_player_name.replace("-", " / ")
+            home_display = all_info['home_name'].replace("-", " / ")
+            away_display = all_info['away_name'].replace("-", " / ")
 
-            server_tag_home = "🎾 " if serving == "home" else ""
-            server_tag_away = " 🎾" if serving == "away" else ""
+            server_tag_home = "🎾 " if all_info['serving'] == "home" else ""
+            server_tag_away = " 🎾" if all_info['serving'] == "away" else ""
 
-            sets_display = "  ".join(score) if score else "0/0"
+            sets_display = "  ".join(all_info['score']) if all_info['score'] else "0/0"
 
-            point_type_display = last_point_type.replace("_", " ").title()
-            winner_display = home_display if last_point_winner == "home" else away_display
+            point_type_display = all_info['last_point_type'].replace("_", " ").title()
+            winner_display = home_display if all_info['last_point_winner'] == "home" else away_display
 
             message = (
-                f"🏆 **{tournament}** — {round}\n"
-                f"{gender.title()} {match_type.title()} • 📍 {stadium}\n"
+                f"🏆 **{all_info['tournament']}** — {all_info['round']}\n"
+                f"{all_info['gender'].title()} {all_info['match_type'].title()} • 📍 {all_info['stadium']}\n"
                 f"{'─' * 32}\n"
                 f"{server_tag_home}**{home_display}**  vs  **{away_display}**{server_tag_away}\n\n"
                 f"**Sets:** {sets_display}\n"
-                f"**Current Game:** `{game_score}`\n\n"
+                f"**Current Game:** `{all_info['game_score']}`\n\n"
                 # f"📢 **Last Point:** {point_type_display} — won by **{winner_display}**\n"
                 f"📢 **Last Point:** won by **{winner_display}**\n"
                 f"🆔 `{event_id}`"
             )
 
-            if event_id in last_messages and last_messages[event_id] == message:
-                queue.task_done()
-                continue
+            # if event_id in last_messages and last_messages[event_id] == message:
+            #     queue.task_done()
+            #     continue
 
-            channel_id = channel_mapping[channel_name]
+            channel_id = channel_mapping[all_info['channel_name']]
             await discord_guild_manager.send_message(channel_id, message, session=session)
             last_messages[event_id] = message
 

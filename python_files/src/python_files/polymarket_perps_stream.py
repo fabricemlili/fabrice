@@ -206,6 +206,7 @@ async def run():
                 continue   # Skip logging if the price change is below the threshold
 
             last_index_price = index_price
+            last_mark_price = mark_price
 
             datetime_str = time.strftime(
                 "%Y-%m-%d %H:%M:%S",

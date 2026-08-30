@@ -1,6 +1,5 @@
 import asyncio
 import sqlite3
-import csv
 import os
 import time
 import queue
@@ -160,8 +159,6 @@ class SQLiteBatchWriter:
 
         finally:
             self.conn.close()
-
-
 
 
 # ---------- MAIN FUNCTION ----------

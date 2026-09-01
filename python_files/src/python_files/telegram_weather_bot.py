@@ -68,10 +68,44 @@ def get_weather_code_description(weather_code: int, language: str = "en") -> str
     return entry.get(language, entry["en"])
 
 
+def handle_forecast_data(data: dict, timezone: str):
+    tomorrow = (datetime.now(ZoneInfo(timezone)) + timedelta(days=1)).date().strftime("%Y-%m-%d")
+
+    morning = [f"{tomorrow}T0{i}:00" for i in range(6, 10)]
+    afternoon = [f"{tomorrow}T{hour:02d}:00" for hour in range(14, 18)]
+    evening = [f"{tomorrow}T{hour:02d}:00" for hour in range(18, 22)]
+
+    def get_weather(time_range, func):
+        temp, idx = func(
+            (
+                (data["hourly"]["temperature_2m"][idx], idx)
+                for idx, time in enumerate(data["hourly"]["time"])
+                if time in time_range
+            ),
+            key=lambda x: x[0]
+        )
+        return {
+            "temperature": temp,
+            "weather_code": data["hourly"]["weather_code"][idx],
+            "wind_speed": data["hourly"]["wind_speed_10m"][idx],
+            "time": datetime.strptime(data["hourly"]["time"][idx], "%Y-%m-%dT%H:%M").strftime("%H:%M"),
+            "units": data["hourly_units"],
+        }
+    
+    morning_weather = get_weather(morning, func=min)
+    afternoon_weather = get_weather(afternoon, func=max)
+    evening_weather = get_weather(evening, func=min)
+
+    return {
+        "morning": morning_weather,
+        "afternoon": afternoon_weather,
+        "evening": evening_weather,
+    }
+
+
 async def get_forecast_tomorrow(
     latitude: float,
     longitude: float,
-    hour: int,
     timezone: str,
     session: aiohttp.ClientSession | None = None,
 ):
@@ -94,17 +128,7 @@ async def get_forecast_tomorrow(
     else:
         data = await _fetch(session)
 
-    tomorrow = (datetime.now(ZoneInfo(timezone)) + timedelta(days=1)).date().strftime("%Y-%m-%d")
-    target_time = f"{tomorrow}T{hour:02d}:00"
-    idx = data["hourly"]["time"].index(target_time)
-
-    return {
-        "temperature": data["hourly"]["temperature_2m"][idx],
-        "weather_code": data["hourly"]["weather_code"][idx],
-        "wind_speed": data["hourly"]["wind_speed_10m"][idx],
-        "units": data["hourly_units"],
-        "time": f"{tomorrow} {hour:02d}:00",
-    }
+    return handle_forecast_data(data, timezone)
 
 
 async def run_scheduled_forecast(
@@ -126,24 +150,30 @@ async def run_scheduled_forecast(
 
             lang = language_preferences.get(user_id, "en")
             try:
-                forecast = await get_forecast_tomorrow(lat, lon, hour, timezone, session)
-                units = forecast["units"]
+                forecast = await get_forecast_tomorrow(lat, lon, timezone, session)
                 await send_message(
                     session,
                     user_id,
-                    TRADUCTIONS["forecast_message"][lang].format(
-                        location=location_name,
-                        time=forecast["time"],
-                        temperature=f"{forecast['temperature']} {units['temperature_2m']}",
-                        weather=get_weather_code_description(forecast["weather_code"], lang),
-                        wind_speed=f"{forecast['wind_speed']} {units['wind_speed_10m']}",
-                    ),
+                    TRADUCTIONS["forecast_message_location"][lang].format(location=location_name),
                 )
-            except Exception:
+                for period in ["morning", "afternoon", "evening"]:
+                    forecast_period = forecast[period]
+                    units = forecast_period["units"]
+                    await send_message(
+                        session,
+                        user_id,
+                        TRADUCTIONS[f"forecast_message_{period}"][lang].format(
+                            temperature=f"{round(forecast_period['temperature'])} {units['temperature_2m']}",
+                            weather=get_weather_code_description(forecast_period["weather_code"], lang),
+                            wind_speed=f"{round(forecast_period['wind_speed'])} {units['wind_speed_10m']}",
+                            time=forecast_period["time"],
+                        ),
+                    )
+            except Exception as e:
                 await send_message(session, user_id, TRADUCTIONS["error_forecast"][lang])
+                print(f"Error in run_scheduled_forecast loop: {e}")
     except asyncio.CancelledError:
         pass
-
 
 # ---------------------------------------------------------------------------
 # Telegram API helpers

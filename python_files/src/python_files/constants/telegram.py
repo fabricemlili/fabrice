@@ -100,10 +100,25 @@ TRADUCTIONS: dict[str, dict[str, str]] = {
         "es": "❌ No tienes ninguna previsión activa. Usa /forecast para programar una.",
         "fr": "❌ Vous n'avez pas de prévision active. Utilisez /forecast pour en programmer une.",
     },
-    "forecast_message": {
-        "en": "📅 Tomorrow's forecast\n\n📍 {location}\n🕐 {time}\n\n🌡️ {temperature}\n{weather}\n💨 {wind_speed}",
-        "es": "📅 Previsión de mañana\n\n📍 {location}\n🕐 {time}\n\n🌡️ {temperature}\n{weather}\n💨 {wind_speed}",
-        "fr": "📅 Prévision de demain\n\n📍 {location}\n🕐 {time}\n\n🌡️ {temperature}\n{weather}\n💨 {wind_speed}",
+    "forecast_message_location": {
+        "en": "📅 Tomorrow's forecast\n\n📍 {location}",
+        "es": "📅 Previsión de mañana\n\n📍 {location}",
+        "fr": "📅 Prévision de demain\n\n📍 {location}",
+    },
+    "forecast_message_morning": {
+        "en": "🌅 Morning\n🌡️ {temperature} (at {time})\n{weather}\n💨 {wind_speed}",
+        "es": "🌅 Mañana\n🌡️ {temperature} (a las {time})\n{weather}\n💨 {wind_speed}",
+        "fr": "🌅 Matin\n🌡️ {temperature} (à {time})\n{weather}\n💨 {wind_speed}",
+    },
+    "forecast_message_afternoon": {
+        "en": "☀️ Afternoon\n🌡️ {temperature} (at {time})\n{weather}\n💨 {wind_speed}",
+        "es": "☀️ Tarde\n🌡️ {temperature} (a las {time})\n{weather}\n💨 {wind_speed}",
+        "fr": "☀️ Après-midi\n🌡️ {temperature} (à {time})\n{weather}\n💨 {wind_speed}",
+    },
+    "forecast_message_evening": {
+        "en": "🌙 Evening\n🌡️ {temperature} (at {time})\n{weather}\n💨 {wind_speed}",
+        "es": "🌙 Noche\n🌡️ {temperature} (a las {time})\n{weather}\n💨 {wind_speed}",
+        "fr": "🌙 Soir\n🌡️ {temperature} (à {time})\n{weather}\n💨 {wind_speed}",
     },
     "error_forecast": {
         "en": "❌ Could not retrieve tomorrow's forecast. Please try again later.",

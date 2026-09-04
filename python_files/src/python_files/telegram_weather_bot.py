@@ -1,20 +1,63 @@
 import os
 import aiohttp
 import asyncio
+from asyncio import Task
+from dataclasses import dataclass
+from enum import StrEnum
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from python_files.constants import WEATHER_CODE, LANGUAGE_KEYBOARD, HOUR_KEYBOARD, COMMANDS_KEYBOARD, TRADUCTIONS
+from python_files.logger import log
+from python_files.database import (
+    init_db,
+    save_user_language,
+    save_scheduled_forecast,
+    delete_scheduled_forecast,
+    get_scheduled_forecasts,
+    load_users,
+)
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
 load_dotenv()
+MAX_SCHEDULED_FORECASTS = 10
 BOT_TOKEN = os.getenv("TOKEN_TELEGRAM")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+PERIODS = {
+    "morning": range(6, 10),
+    "afternoon": range(14, 18),
+    "evening": range(18, 22),
+}
 
+# ---------------------------------------------------------------------------
+# Data classes for forecast state and scheduled forecasts
+# ---------------------------------------------------------------------------
+
+class ForecastStep(StrEnum):
+    LOCATION = "awaiting_forecast_location"
+    HOUR = "awaiting_forecast_hour"
+
+@dataclass
+class ForecastState:
+    step: str
+    location: dict | None = None
+
+@dataclass
+class ScheduledForecast:
+    lat: float
+    lon: float
+    timezone: str
+    location_name: str
+    hour: int
+    task: Task
+
+forecast_state: dict[int, ForecastState] = {}  # step: "awaiting_location" | "awaiting_hour"
+scheduled_forecasts: dict[int, ScheduledForecast] = {}  # active scheduled forecast tasks
 language_preferences: dict[int, str] = {}
-forecast_state: dict[int, dict] = {}  # step: "awaiting_location" | "awaiting_hour"
-scheduled_forecasts: dict[int, dict] = {}  # active scheduled forecast tasks
-
 
 # ---------------------------------------------------------------------------
 # Weather API helpers
@@ -30,7 +73,14 @@ async def get_location(
 
     async def _fetch(s: aiohttp.ClientSession):
         async with s.get(url, params=params) as response:
-            return (await response.json())["results"][0]
+            response.raise_for_status()
+            data = await response.json()
+            results = data.get("results", [])
+
+            if not results:
+                raise ValueError(f"Location not found: {city_name}")
+
+            return results[0]
 
     if session is None:
         async with aiohttp.ClientSession() as s:
@@ -42,7 +92,7 @@ async def get_weather(
     latitude: float,
     longitude: float,
     session: aiohttp.ClientSession | None = None,
-):
+) -> dict:
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": latitude,
@@ -53,6 +103,7 @@ async def get_weather(
 
     async def _fetch(s: aiohttp.ClientSession):
         async with s.get(url, params=params) as response:
+            response.raise_for_status()
             return await response.json()
 
     if session is None:
@@ -68,22 +119,24 @@ def get_weather_code_description(weather_code: int, language: str = "en") -> str
     return entry.get(language, entry["en"])
 
 
-def handle_forecast_data(data: dict, timezone: str):
+def handle_forecast_data(data: dict, timezone: str) -> dict:
     tomorrow = (datetime.now(ZoneInfo(timezone)) + timedelta(days=1)).date().strftime("%Y-%m-%d")
 
-    morning = [f"{tomorrow}T0{i}:00" for i in range(6, 10)]
-    afternoon = [f"{tomorrow}T{hour:02d}:00" for hour in range(14, 18)]
-    evening = [f"{tomorrow}T{hour:02d}:00" for hour in range(18, 22)]
+    morning = [f"{tomorrow}T0{i}:00" for i in PERIODS["morning"]]
+    afternoon = [f"{tomorrow}T{hour:02d}:00" for hour in PERIODS["afternoon"]]
+    evening = [f"{tomorrow}T{hour:02d}:00" for hour in PERIODS["evening"]]
 
     def get_weather(time_range, func):
-        temp, idx = func(
-            (
-                (data["hourly"]["temperature_2m"][idx], idx)
-                for idx, time in enumerate(data["hourly"]["time"])
-                if time in time_range
-            ),
-            key=lambda x: x[0]
-        )
+        candidates = [
+            (data["hourly"]["temperature_2m"][idx], idx)
+            for idx, time in enumerate(data["hourly"]["time"])
+            if time in time_range
+        ]
+
+        if not candidates:
+            raise ValueError("No weather data available for expected forecast period")
+
+        temp, idx = func(candidates, key=lambda x: x[0])
         return {
             "temperature": temp,
             "weather_code": data["hourly"]["weather_code"][idx],
@@ -108,7 +161,7 @@ async def get_forecast_tomorrow(
     longitude: float,
     timezone: str,
     session: aiohttp.ClientSession | None = None,
-):
+) -> dict:
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": latitude,
@@ -120,6 +173,7 @@ async def get_forecast_tomorrow(
 
     async def _fetch(s: aiohttp.ClientSession):
         async with s.get(url, params=params) as response:
+            response.raise_for_status()
             return await response.json()
 
     if session is None:
@@ -129,6 +183,13 @@ async def get_forecast_tomorrow(
         data = await _fetch(session)
 
     return handle_forecast_data(data, timezone)
+
+
+def get_next_run(hour: int, now: datetime) -> datetime:
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return target
 
 
 async def run_scheduled_forecast(
@@ -143,9 +204,7 @@ async def run_scheduled_forecast(
     try:
         while True:
             now = datetime.now(ZoneInfo(timezone))
-            target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-            if target <= now:
-                target += timedelta(days=1)
+            target = get_next_run(hour, now)
             await asyncio.sleep((target - now).total_seconds())
 
             lang = language_preferences.get(user_id, "en")
@@ -171,7 +230,7 @@ async def run_scheduled_forecast(
                     )
             except Exception as e:
                 await send_message(session, user_id, TRADUCTIONS["error_forecast"][lang])
-                print(f"Error in run_scheduled_forecast loop: {e}")
+                log(f"Error in run_scheduled_forecast loop: {e}", "ERROR")
     except asyncio.CancelledError:
         pass
 
@@ -204,9 +263,13 @@ async def send_message(
             "resize_keyboard": True,
             "one_time_keyboard": False,
         }
-    async with session.post(f"{TELEGRAM_API}/sendMessage", json=data) as response:
-        response.raise_for_status()
-        return await response.json()
+    try:
+        async with session.post(f"{TELEGRAM_API}/sendMessage", json=data) as response:
+            response.raise_for_status()
+            return await response.json()
+    except aiohttp.ClientError:
+        log("Failed to send Telegram message", "EXCEPTION")
+        raise
 
 
 async def answer_callback_query(session: aiohttp.ClientSession, callback_query_id: str):
@@ -239,13 +302,28 @@ async def handle_language_selection(
     user_id: int,
     language_code: str,
 ):
+    if language_code not in TRADUCTIONS["lang_set"]:
+        await send_message(session, user_id, TRADUCTIONS["error_occurred"]["en"])
+        return
+
     language_preferences[user_id] = language_code
-    await send_message(session, user_id, TRADUCTIONS["lang_set"][language_code], reply_keyboard=COMMANDS_KEYBOARD)
+
+    await save_user_language(
+        user_id,
+        language_code,
+    )
+
+    await send_message(
+        session,
+        user_id,
+        TRADUCTIONS["lang_set"][language_code],
+        reply_keyboard=COMMANDS_KEYBOARD,
+    )
 
 
 async def handle_forecast_command(session: aiohttp.ClientSession, user_id: int):
     lang = language_preferences.get(user_id, "en")
-    forecast_state[user_id] = {"step": "awaiting_forecast_location"}
+    forecast_state[user_id] = ForecastState(step=ForecastStep.LOCATION)
     await send_message(session, user_id, TRADUCTIONS["forecast_ask_location"][lang])
 
 
@@ -256,8 +334,21 @@ async def handle_forecast_location(session: aiohttp.ClientSession, user_id: int,
     except Exception:
         await send_message(session, user_id, TRADUCTIONS["error_location"][lang].format(location=text))
         return
-    forecast_state[user_id] = {"step": "awaiting_forecast_hour", "location": location}
+    forecast_state[user_id] = ForecastState(step=ForecastStep.HOUR, location=location)
     await send_message(session, user_id, TRADUCTIONS["forecast_ask_hour"][lang], keyboard=HOUR_KEYBOARD)
+
+
+def format_location_name(location: dict) -> str:
+    parts = [
+        location[f"admin{i}"]
+        for i in range(10)
+        if location.get(f"admin{i}")
+    ]
+
+    if location.get("country"):
+        parts.append(location["country"])
+
+    return ", ".join(parts)
 
 
 async def handle_forecast_hour_selection(
@@ -268,19 +359,12 @@ async def handle_forecast_hour_selection(
     lang = language_preferences.get(user_id, "en")
     state = forecast_state.pop(user_id, None)
 
-    if not state or state.get("step") != "awaiting_forecast_hour":
+    if not state or state.step != ForecastStep.HOUR or not state.location:
         await send_message(session, user_id, TRADUCTIONS["forecast_no_active"][lang])
         return
 
-    location = state["location"]
-    location_parts = [
-        location[f"admin{i}"]
-        for i in range(10)
-        if location.get(f"admin{i}")
-    ]
-    if location.get("country"):
-        location_parts.append(location["country"])
-    location_name = ", ".join(location_parts)
+    location = state.location
+    location_name = format_location_name(location)
 
     try:
         weather = await get_weather(location["latitude"], location["longitude"], session=session)
@@ -290,37 +374,100 @@ async def handle_forecast_hour_selection(
         return
 
     if user_id in scheduled_forecasts:
-        scheduled_forecasts[user_id]["task"].cancel()
+        scheduled_forecasts[user_id].task.cancel()
+    elif len(scheduled_forecasts) >= MAX_SCHEDULED_FORECASTS:
+        await send_message(session, user_id, TRADUCTIONS["error_occurred"][lang])
+        return
 
     task = asyncio.create_task(
         run_scheduled_forecast(
-            session, user_id,
-            location["latitude"], location["longitude"],
-            timezone, location_name, hour,
+            session,
+            user_id,
+            location["latitude"],
+            location["longitude"],
+            timezone,
+            location_name,
+            hour,
         )
     )
-    scheduled_forecasts[user_id] = {
-        "lat": location["latitude"],
-        "lon": location["longitude"],
-        "timezone": timezone,
-        "location_name": location_name,
-        "hour": hour,
-        "task": task,
-    }
+
+    scheduled_forecasts[user_id] = ScheduledForecast(
+        lat=location["latitude"],
+        lon=location["longitude"],
+        timezone=timezone,
+        location_name=location_name,
+        hour=hour,
+        task=task,
+    )
+
+    await save_scheduled_forecast(
+        user_id,
+        location["latitude"],
+        location["longitude"],
+        timezone,
+        location_name,
+        hour,
+    )
+
     await send_message(
         session, user_id,
         TRADUCTIONS["forecast_scheduled"][lang].format(location=location_name, hour=hour),
     )
 
+async def restore_scheduled_forecasts(
+    session: aiohttp.ClientSession,
+):
+    schedules = await get_scheduled_forecasts()
 
-async def handle_cancel_forecast(session: aiohttp.ClientSession, user_id: int):
+    for schedule in schedules:
+        user_id = schedule["user_id"]
+
+        task = asyncio.create_task(
+            run_scheduled_forecast(
+                session,
+                user_id,
+                schedule["latitude"],
+                schedule["longitude"],
+                schedule["timezone"],
+                schedule["location_name"],
+                schedule["hour"],
+            )
+        )
+
+        scheduled_forecasts[user_id] = ScheduledForecast(
+            lat=schedule["latitude"],
+            lon=schedule["longitude"],
+            timezone=schedule["timezone"],
+            location_name=schedule["location_name"],
+            hour=schedule["hour"],
+            task=task,
+        )
+
+async def handle_cancel_forecast(
+    session: aiohttp.ClientSession,
+    user_id: int,
+):
     lang = language_preferences.get(user_id, "en")
+
     if user_id not in scheduled_forecasts:
-        await send_message(session, user_id, TRADUCTIONS["forecast_no_active"][lang])
+        await send_message(
+            session,
+            user_id,
+            TRADUCTIONS["forecast_no_active"][lang],
+        )
         return
-    scheduled_forecasts.pop(user_id)["task"].cancel()
+
+    scheduled_forecasts.pop(user_id).task.cancel()
+
+    await delete_scheduled_forecast(user_id)
+
     forecast_state.pop(user_id, None)
-    await send_message(session, user_id, TRADUCTIONS["forecast_cancelled"][lang])
+
+    await send_message(
+        session,
+        user_id,
+        TRADUCTIONS["forecast_cancelled"][lang],
+    )
 
 
 async def handle_start(session: aiohttp.ClientSession, user_id: int):
@@ -348,14 +495,7 @@ async def handle_location_request(
         await send_message(session, user_id, TRADUCTIONS["error_location"][lang].format(location=text))
         return
 
-    location_parts = [
-        location[f"admin{i}"]
-        for i in range(10)
-        if location.get(f"admin{i}")
-    ]
-    if location.get("country"):
-        location_parts.append(location["country"])
-    location_name = ", ".join(location_parts)
+    location_name = format_location_name(location)
 
     try:
         weather = await get_weather(location["latitude"], location["longitude"], session=session)
@@ -384,6 +524,7 @@ async def handle_message(session: aiohttp.ClientSession, message: dict):
     user_id = message["from"]["id"]
     text = message.get("text", "").strip()
     lang = language_preferences.get(user_id, "en")
+    state = forecast_state.get(user_id)
 
     if text == "/start":
         await handle_start(session, user_id)
@@ -398,18 +539,17 @@ async def handle_message(session: aiohttp.ClientSession, message: dict):
     elif text in ["/cancelforecast", "❌ Cancel forecast"]:
         await handle_cancel_forecast(session, user_id)
 
-    elif forecast_state.get(user_id, {}).get("step") == "awaiting_forecast_location":
+    elif state and state.step == ForecastStep.LOCATION:
         await handle_forecast_location(session, user_id, text)
 
-    elif forecast_state.get(user_id, {}).get("step") == "awaiting_forecast_hour":
+    elif state and state.step == ForecastStep.HOUR:
         await send_message(session, user_id, TRADUCTIONS["forecast_ask_hour"][lang], keyboard=HOUR_KEYBOARD)
 
     else:
         try:
             await handle_location_request(session, user_id, text)
         except Exception as e:
-            await send_message(session, user_id, f"❌ An error occurred: {e}")
-
+            await send_message(session, user_id, f"❌ {TRADUCTIONS['error_occurred'][lang]}")
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -419,10 +559,16 @@ async def main():
     if not BOT_TOKEN:
         raise ValueError("TOKEN_TELEGRAM is missing from .env")
 
+    await init_db()
+
+    global language_preferences
+    language_preferences = await load_users()
     offset = None
 
     async with aiohttp.ClientSession() as session:
-        print("🤖 Bot started!")
+        log("🤖 Bot started!")
+
+        await restore_scheduled_forecasts(session)
 
         while True:
             try:
@@ -438,7 +584,7 @@ async def main():
                         await handle_callback_query(session, callback_query)
 
             except Exception as e:
-                print(f"❌ Error: {e}")
+                log(f"❌ Error: {e}", "ERROR")
                 await asyncio.sleep(5)  # Wait before retrying
 
 

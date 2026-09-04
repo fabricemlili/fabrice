@@ -4,6 +4,7 @@ import os
 import time
 import queue
 import threading
+from collections.abc import Mapping
 
 from python_files.polymarket_perps_stream import PolymarketPerpsStream, SUPPORTED_SYMBOLS
 from python_files.logger import log
@@ -42,7 +43,8 @@ class SQLiteBatchWriter:
 
         self._queue: "queue.Queue[dict]" = queue.Queue(maxsize=10_000)
         self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread: threading.Thread | None = None
+        self.conn: sqlite3.Connection | None = None
         self._last_alert_time = 0.0
 
     @staticmethod
@@ -75,6 +77,9 @@ class SQLiteBatchWriter:
 
     def _save_batch(self, batch: list[dict]) -> None:
         log(f"Saving batch of {len(batch)} records to database...", level="INFO")
+        if self.conn is None:
+            raise RuntimeError("Database connection is not initialized")
+
         self.conn.executemany(
             """
             INSERT INTO {} (
@@ -96,19 +101,32 @@ class SQLiteBatchWriter:
         log(f"Batch of {len(batch)} records saved to database.", level="INFO")
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
         if not self._thread.is_alive():
             log(f"Starting SQLiteBatchWriter thread for {self.table_name}...", level="INFO")
             self._thread.start()
 
     def stop(self) -> None:
-        if self._thread.is_alive():
+        if self._thread is not None and self._thread.is_alive():
             log(f"Stopping SQLiteBatchWriter thread for {self.table_name}...", level="INFO")
             self._stop_event.set()
             self._thread.join()
 
-    def write(self, data: dict) -> None:
+    def write(self, data: Mapping[str, object]) -> None:
+        missing_columns = [col for col in self.columns if col not in data]
+        if missing_columns:
+            log(
+                f"Invalid row for {self.table_name}: missing columns {missing_columns}. Dropping row.",
+                level="WARNING",
+            )
+            return
+
         try:
-            self._queue.put_nowait(data)
+            self._queue.put_nowait(dict(data))
             self._check_queue_health()
         except queue.Full:
             now = time.monotonic()
@@ -142,7 +160,10 @@ class SQLiteBatchWriter:
                 if time_since_write > self.alert_delay_threshold and batch:
                     now = time.monotonic()
                     if now - self._last_alert_time > 10.0:
-                        print(f"⚠️  Queue delay exceeded threshold: {time_since_write:.2f}s (> {self.alert_delay_threshold}s) since last write, {len(batch)} items pending")
+                        log(
+                            f"⚠️  Queue delay exceeded threshold: {time_since_write:.2f}s (> {self.alert_delay_threshold}s) since last write, {len(batch)} items pending",
+                            level="WARNING",
+                        )
                         self._last_alert_time = now
 
                 should_ = batch and (
@@ -158,21 +179,23 @@ class SQLiteBatchWriter:
                 self._save_batch(batch)
 
         finally:
-            self.conn.close()
+            if self.conn is not None:
+                self.conn.close()
+                self.conn = None
 
 
 # ---------- MAIN FUNCTION ----------
 
 async def run():
 
-    async def consume(symbol, queue):
+    async def consume(symbol: str, subscription_queue):
         try:
             while True:
-                data = await queue.get()
+                data = await subscription_queue.get()
                 try:
                     db_writer.write(data)
                 finally:
-                    queue.task_done()
+                    subscription_queue.task_done()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -196,14 +219,14 @@ async def run():
     db_writer.start()
 
     stream = PolymarketPerpsStream()
-    await stream.start()
-
     consumers = []
 
     try:
+        await stream.start()
+
         for symbol in SUPPORTED_SYMBOLS:
-            queue = await stream.subscribe_ticker(symbol)
-            consumers.append(asyncio.create_task(consume(symbol, queue)))
+            subscription_queue = await stream.subscribe_ticker(symbol)
+            consumers.append(asyncio.create_task(consume(symbol, subscription_queue)))
 
         await asyncio.gather(*consumers)
 

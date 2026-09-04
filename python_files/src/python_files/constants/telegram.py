@@ -125,4 +125,9 @@ TRADUCTIONS: dict[str, dict[str, str]] = {
         "es": "❌ No se pudo obtener la previsión de mañana. Por favor, inténtalo más tarde.",
         "fr": "❌ Impossible de récupérer la prévision de demain. Veuillez réessayer plus tard.",
     },
+    "error_occurred": {
+        "en": "❌ An error occurred. Please try again later.",
+        "es": "❌ Ocurrió un error. Por favor, inténtalo más tarde.",
+        "fr": "❌ Une erreur s'est produite. Veuillez réessayer plus tard.",
+    }
 }

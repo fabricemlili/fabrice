@@ -555,7 +555,7 @@ async def handle_message(session: aiohttp.ClientSession, message: dict):
 # Entry point
 # ---------------------------------------------------------------------------
 
-async def main():
+async def run():
     if not BOT_TOKEN:
         raise ValueError("TOKEN_TELEGRAM is missing from .env")
 
@@ -583,10 +583,20 @@ async def main():
                     if callback_query := update.get("callback_query"):
                         await handle_callback_query(session, callback_query)
 
+            except KeyboardInterrupt:
+                break
+
             except Exception as e:
                 log(f"❌ Error: {e}", "ERROR")
                 await asyncio.sleep(5)  # Wait before retrying
 
 
+def main():
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        log("🛑 Bot stopped by user", "INFO")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

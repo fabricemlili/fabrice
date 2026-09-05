@@ -8,9 +8,9 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
-from python_files.constants import WEATHER_CODE, LANGUAGE_KEYBOARD, HOUR_KEYBOARD, COMMANDS_KEYBOARD, TRADUCTIONS
-from python_files.logger import log
-from python_files.database import (
+from python_files.telegram_weather.constants import WEATHER_CODE, LANGUAGE_KEYBOARD, HOUR_KEYBOARD, COMMANDS_KEYBOARD, TRADUCTIONS
+from python_files.shared.logger import log
+from python_files.telegram_weather.database import (
     init_db,
     save_user_language,
     save_scheduled_forecast,
@@ -122,7 +122,7 @@ def get_weather_code_description(weather_code: int, language: str = "en") -> str
 def handle_forecast_data(data: dict, timezone: str) -> dict:
     tomorrow = (datetime.now(ZoneInfo(timezone)) + timedelta(days=1)).date().strftime("%Y-%m-%d")
 
-    morning = [f"{tomorrow}T0{i}:00" for i in PERIODS["morning"]]
+    morning = [f"{tomorrow}T{i:02d}:00" for i in PERIODS["morning"]]
     afternoon = [f"{tomorrow}T{hour:02d}:00" for hour in PERIODS["afternoon"]]
     evening = [f"{tomorrow}T{hour:02d}:00" for hour in PERIODS["evening"]]
 

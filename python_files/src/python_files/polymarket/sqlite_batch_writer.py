@@ -1,16 +1,16 @@
 import asyncio
 import sqlite3
-import os
 import time
 import queue
 import threading
 from collections.abc import Mapping
+from pathlib import Path
 
-from python_files.polymarket_perps_stream import PolymarketPerpsStream, SUPPORTED_SYMBOLS
-from python_files.logger import log
+from python_files.polymarket.perps_stream import PolymarketPerpsStream, SUPPORTED_SYMBOLS
+from python_files.shared.logger import log
 
 
-DB_PATH = "python_files/src/python_files/data/market_data.db"
+DB_PATH = Path(__file__).parent.parent / "data" / "market_data.db"
 BATCH_SIZE = 500
 BATCH_INTERVAL = 2.0 # seconds
 ALERT_QUEUE_THRESHOLD = 1000
@@ -20,7 +20,7 @@ ALERT_DELAY_THRESHOLD = 5.0 # seconds
 class SQLiteBatchWriter:
     def __init__(
         self,
-        db_path: str,
+        db_path: str | Path,
         columns: dict[str, str],
         index_columns: list[str] | None = None,
         batch_size: int = 200,
@@ -32,9 +32,9 @@ class SQLiteBatchWriter:
             raise ValueError("All index_columns must be present in columns")
         self.index_columns = index_columns
         self.columns = columns
-        self.db_path = db_path
-        self.table_name = os.path.splitext(os.path.basename(db_path))[0].replace("-", "_").replace(" ", "_")
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self.db_path = Path(db_path)
+        self.table_name = self.db_path.stem.replace("-", "_").replace(" ", "_")
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.batch_size = batch_size
         self.batch_interval = batch_interval
@@ -48,7 +48,7 @@ class SQLiteBatchWriter:
         self._last_alert_time = 0.0
 
     @staticmethod
-    def _init_db(db_path: str, table_name: str, columns: dict, index_columns: list[str] | None) -> sqlite3.Connection:
+    def _init_db(db_path: Path, table_name: str, columns: dict, index_columns: list[str] | None) -> sqlite3.Connection:
         log(f"Initializing database {table_name} at {db_path}...", level="INFO")
         conn = sqlite3.connect(db_path)
 
@@ -166,11 +166,11 @@ class SQLiteBatchWriter:
                         )
                         self._last_alert_time = now
 
-                should_ = batch and (
+                should_flush = batch and (
                     len(batch) >= self.batch_size
                     or time.monotonic() - last_write >= self.batch_interval
                 )
-                if should_:
+                if should_flush:
                     self._save_batch(batch)
                     batch = []
                     last_write = time.monotonic()

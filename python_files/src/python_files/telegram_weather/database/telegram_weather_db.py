@@ -1,6 +1,7 @@
 import aiosqlite
+from pathlib import Path
 
-DB_PATH = "python_files/src/python_files/database/telegram_weather_bot.db"
+DB_PATH = Path(__file__).parent / "telegram_weather_bot.db"
 
 
 async def init_db():

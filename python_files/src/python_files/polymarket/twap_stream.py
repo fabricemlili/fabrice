@@ -2,7 +2,7 @@ import websockets
 import asyncio
 import json
 import time
-from python_files.logger import log
+from python_files.shared.logger import log
 
 
 # ------------ PARAMETERS ------------

@@ -1,7 +1,7 @@
 [project]
 name = "python-files"
 version = "0.1.0"
-description = "Add your description here"
+description = "Polymarket WebSocket streams and Telegram weather bot"
 readme = "README.md"
 authors = [
     { name = "fabricemlili", email = "fmlili@hotmail.fr" }
@@ -15,7 +15,10 @@ dependencies = [
 ]
 
 [project.scripts]
-all = "python_files:main"
+polymarket-perps = "python_files.polymarket.perps_stream:main"
+polymarket-twap = "python_files.polymarket.twap_stream:main"
+polymarket-record = "python_files.polymarket.sqlite_batch_writer:main"
+telegram-weather-bot = "python_files.telegram_weather.bot:main"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
